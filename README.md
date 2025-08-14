@@ -19,8 +19,8 @@ A simple configuration tool for [aichat](https://github.com/sigoden/aichat) that
 ### From Source
 
 ```bash
-git clone https://github.com/zrs01/aichatconf
-cd aichatconf
+git clone https://github.com/zrs01/aichat-conf
+cd aichat-conf
 make
 ```
 
@@ -88,5 +88,4 @@ make test
 
 ## License
 
-MIT License
-````
+[MIT License](LICENSE)

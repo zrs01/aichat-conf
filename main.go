@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -16,14 +15,14 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v3"
 	"github.com/ztrue/tracerr"
-	"gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
 )
 
 var (
-	version    string
-	debug      bool
-	configFile string
-	exclude    string // models exclude
+	version string
+	debug   bool
+	cfgFile string
+	exclude string // models exclude
 )
 
 func main() {
@@ -46,7 +45,7 @@ func main() {
 				Aliases:     []string{"c"},
 				Required:    true,
 				Usage:       "config file of aichat",
-				Destination: &configFile,
+				Destination: &cfgFile,
 			},
 			&cli.StringFlag{
 				Name:        "exclude",
@@ -71,34 +70,49 @@ func main() {
 }
 
 func process() error {
-	yamlFile, err := os.ReadFile(configFile)
+	/* -------------------------------------------------------------------------- */
+	/*                          READ AICHAT CONFIGURATION                         */
+	/* -------------------------------------------------------------------------- */
+	cfgBody, err := os.ReadFile(cfgFile)
 	if err != nil {
 		return tracerr.Wrap(err)
 	}
-	var aichatConf ConfigStruct
-	if err := yaml.Unmarshal(yamlFile, &aichatConf); err != nil {
+	// use yaml.Node type to unmarshal in order to keep the comment
+	var cfgDocNode yaml.Node
+	if err := yaml.Unmarshal(cfgBody, &cfgDocNode); err != nil {
 		return tracerr.Wrap(err)
 	}
-	// find ollama provider
-	client, index, found := lo.FindIndexOf(aichatConf.Clients, func(c Client) bool {
-		return c.Name == "ollama"
-	})
-	if !found {
-		logrus.Info("ollama provider not found")
-		return nil
+	if len(cfgDocNode.Content) == 0 {
+		return tracerr.New("empty config file")
 	}
-	modelList, err := getModelList()
-	if err != nil {
-		return tracerr.Wrap(err)
+	// find the clients
+	cfgClientNode, _ := getNodeValue(cfgDocNode.Content[0], "clients", yaml.SequenceNode)
+
+	cfgOllamaModels := &yaml.Node{}
+	for _, cn := range cfgClientNode.Content {
+		for j, node := range cn.Content {
+			if node.Kind == yaml.ScalarNode && node.Value == "name" {
+				if cn.Content[j+1].Kind == yaml.ScalarNode && cn.Content[j+1].Value == "ollama" {
+					cfgOllamaModels, _ = getNodeValue(cn, "models", yaml.SequenceNode)
+				}
+			}
+		}
 	}
 
+	/* -------------------------------------------------------------------------- */
+	/*                                OLLAMA MODELS                               */
+	/* -------------------------------------------------------------------------- */
+	ollamaModels, err := getOllamaModels()
+	if err != nil {
+		return tracerr.Wrap(err)
+	}
 	// exclude models
 	if exclude != "" {
 		excludeModels := strings.Split(exclude, ",")
 		lo.ForEach(excludeModels, func(model string, _ int) {
 			model = strings.TrimSpace(model)
 		})
-		modelList = lo.Filter(modelList, func(model string, _ int) bool {
+		ollamaModels = lo.Filter(ollamaModels, func(model string, _ int) bool {
 			for _, excludeModel := range excludeModels {
 				if strings.Contains(model, excludeModel) {
 					return false
@@ -108,65 +122,108 @@ func process() error {
 		})
 	}
 
-	// iterated the model list, add the missing model to aichat configuration
-	for _, model := range modelList {
-		_, found := lo.Find(client.Models, func(m ClientModel) bool {
-			return m.Name == model
-		})
-		if !found {
-			info, err := getModelInfo(model)
-			if err != nil {
-				return tracerr.Wrap(err)
+	// remove obsolete models
+	{
+		newModels := []*yaml.Node{}
+		for _, cfgModel := range cfgOllamaModels.Content {
+			cfgModelName, ok := getNodeValue(cfgModel, "name", yaml.ScalarNode)
+			if ok {
+				if lo.Contains(ollamaModels, cfgModelName.Value) {
+					newModels = append(newModels, cfgModel)
+				}
 			}
-			// o, _ := yaml.Marshal(info)
-			// fmt.Println(string(o))
-
-			newModel := ClientModel{Name: model}
-
-			// find the max context length
-			for key, value := range info.ModelInfo {
-				if strings.Contains(key, ".context_length") {
-					maxContextLength := int(value.(float64))
-					if maxContextLength > 0 {
-						newModel.MaxInputTokens = maxContextLength
-					}
+		}
+		cfgOllamaModels.Content = newModels
+	}
+	// add new models
+	{
+		for _, model := range ollamaModels {
+			found := false
+			for _, cfgModel := range cfgOllamaModels.Content {
+				cfgModelName, ok := getNodeValue(cfgModel, "name", yaml.ScalarNode)
+				if ok && cfgModelName.Value == model {
+					found = true
 					break
 				}
 			}
-			// find parameters
-			parameters := strings.SplitSeq(info.Parameters, "\n")
-			for parameter := range parameters {
-				paramKV := strings.Fields(parameter)
-				if len(paramKV) > 1 {
-					paramValue := strings.TrimSpace(paramKV[1])
-					if strings.Contains(paramKV[0], "temperature") {
-						f, err := strconv.ParseFloat(paramValue, 64)
-						if err == nil {
-							newModel.Temperature = f
-						}
-					}
-					if strings.Contains(paramKV[0], "top_p") {
-						f, err := strconv.ParseFloat(paramValue, 64)
-						if err == nil {
-							newModel.TopP = f
-						}
-					}
+			if !found {
+				maxCtxLen, temperature, topP, err := getModelParameters(model)
+				if err != nil {
+					tracerr.Wrap(err)
 				}
+				newNode := &yaml.Node{
+					Kind: yaml.MappingNode,
+					Content: []*yaml.Node{
+						{Kind: yaml.ScalarNode, Value: "name"},
+						{Kind: yaml.ScalarNode, Value: model},
+					},
+				}
+				if maxCtxLen > 0 {
+					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "max_input_tokens"})
+					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: strconv.Itoa(maxCtxLen)})
+				}
+				if temperature > 0 {
+					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "temperature"})
+					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: strconv.FormatFloat(temperature, 'f', 1, 64)})
+				}
+				if topP > 0 {
+					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "top_p"})
+					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: strconv.FormatFloat(topP, 'f', 1, 64)})
+				}
+				cfgOllamaModels.Content = append(cfgOllamaModels.Content, newNode)
 			}
-			client.Models = append(client.Models, newModel)
 		}
 	}
-	sort.Slice(client.Models, func(i, j int) bool {
-		return client.Models[i].Name < client.Models[j].Name
-	})
-	aichatConf.Clients[index] = client
 
-	out, err := yaml.Marshal(aichatConf)
+	/* -------------------------------------------------------------------------- */
+	/*                         UPDATE AICHAT CONFIGURATION                        */
+	/* -------------------------------------------------------------------------- */
+	for i, cn := range cfgClientNode.Content {
+		for j, node := range cn.Content {
+			if node.Kind == yaml.ScalarNode && node.Value == "name" {
+				if cn.Content[j+1].Kind == yaml.ScalarNode && cn.Content[j+1].Value == "ollama" {
+					setNodeValue(cfgClientNode.Content[i].Content[j+2], "models", cfgOllamaModels)
+				}
+			}
+		}
+	}
+
+	/* -------------------------------------------------------------------------- */
+	/*                                   OUTPUT                                   */
+	/* -------------------------------------------------------------------------- */
+	out, err := yaml.Marshal(cfgDocNode.Content[0])
 	if err != nil {
 		return tracerr.Wrap(err)
 	}
 	fmt.Printf("\n%s", string(out))
+
 	return nil
+}
+
+func getNodeValue(node *yaml.Node, key string, valueKind yaml.Kind) (*yaml.Node, bool) {
+	for i, childNode := range node.Content {
+		if childNode.Kind == yaml.ScalarNode && childNode.Value == key {
+			if i+1 < len(node.Content) {
+				if node.Content[i+1].Kind == valueKind {
+					return node.Content[i+1], true
+				}
+			}
+		}
+	}
+	return &yaml.Node{Kind: valueKind}, false
+}
+
+func setNodeValue(node *yaml.Node, key string, value *yaml.Node) {
+	for i, childNode := range node.Content {
+		if childNode.Kind == yaml.ScalarNode && childNode.Value == key {
+			if i+1 < len(node.Content) {
+				node.Content[i+1] = value
+				return
+			}
+		}
+	}
+	node.Content = append(node.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: key})
+	node.Content = append(node.Content, value)
 }
 
 func initLogrus() {
@@ -176,7 +233,7 @@ func initLogrus() {
 	})
 }
 
-func getModelList() ([]string, error) {
+func getOllamaModels() ([]string, error) {
 	client, err := api.ClientFromEnvironment()
 	if err != nil {
 		return []string{}, tracerr.Wrap(err)
@@ -189,6 +246,45 @@ func getModelList() ([]string, error) {
 		return model.Name
 	})
 	return models, nil
+}
+
+func getModelParameters(model string) (int, float64, float64, error) {
+	maxContextLength := -1
+	temperature := -1.0
+	topP := -1.0
+
+	info, err := getModelInfo(model)
+	if err != nil {
+		return maxContextLength, temperature, topP, tracerr.Wrap(err)
+	}
+	// find the max context length
+	for key, value := range info.ModelInfo {
+		if strings.Contains(key, ".context_length") {
+			maxContextLength = int(value.(float64))
+			break
+		}
+	}
+	// find temperature and top_p
+	parameters := strings.SplitSeq(info.Parameters, "\n")
+	for parameter := range parameters {
+		paramKV := strings.Fields(parameter)
+		if len(paramKV) > 1 {
+			paramValue := strings.TrimSpace(paramKV[1])
+			if strings.Contains(paramKV[0], "temperature") {
+				f, err := strconv.ParseFloat(paramValue, 64)
+				if err == nil {
+					temperature = f
+				}
+			}
+			if strings.Contains(paramKV[0], "top_p") {
+				f, err := strconv.ParseFloat(paramValue, 64)
+				if err == nil {
+					topP = f
+				}
+			}
+		}
+	}
+	return maxContextLength, temperature, topP, nil
 }
 
 func getModelInfo(model string) (*api.ShowResponse, error) {
