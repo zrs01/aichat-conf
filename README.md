@@ -44,6 +44,7 @@ aichatconf -c /path/to/aichat/config.yaml
 ### Options
 
 - `-c, --config`: Path to aichat configuration file (required)
+- `-n, --client`: Client name, default is "ollama"
 - `-e, --exclude`: Comma-separated list of models to exclude
 - `-o, --output`: Output file, default is stdout
 - `-q, --quite`: Suppress all information output

@@ -13,7 +13,8 @@ import (
 	"time"
 
 	nested "github.com/antonfisher/nested-logrus-formatter"
-	"github.com/ollama/ollama/api"
+	olmapi "github.com/ollama/ollama/api"
+	olmmodel "github.com/ollama/ollama/types/model"
 	"github.com/samber/lo"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v3"
@@ -26,9 +27,10 @@ var (
 	debug        bool
 	quiet        bool
 	cfgFile      string
+	clientName   string
 	outFile      string
 	exclude      string // models exclude
-	ollamaClient *api.Client
+	ollamaClient *olmapi.Client
 )
 
 func main() {
@@ -45,6 +47,13 @@ func main() {
 				Required:    true,
 				Usage:       "config file of aichat",
 				Destination: &cfgFile,
+			},
+			&cli.StringFlag{
+				Name:        "client",
+				Aliases:     []string{"n"},
+				Value:       "ollama",
+				Usage:       "client name",
+				Destination: &clientName,
 			},
 			&cli.StringFlag{
 				Name:        "exclude",
@@ -115,7 +124,7 @@ func process() error {
 	}
 	// find the clients
 	cfgClients, _ := getNodeValue(cfgDocNode.Content[0], "clients", yaml.SequenceNode)
-	cfgOllamaClient := &yaml.Node{}
+	var cfgOllamaClient *yaml.Node = nil
 	verboseInfo("number of clients found: %d", len(cfgClients.Content))
 
 	// find the ollama client and its models
@@ -123,13 +132,16 @@ func process() error {
 	for _, cn := range cfgClients.Content {
 		for j, node := range cn.Content {
 			if node.Kind == yaml.ScalarNode && node.Value == "name" {
-				if cn.Content[j+1].Kind == yaml.ScalarNode && cn.Content[j+1].Value == "ollama" {
+				if cn.Content[j+1].Kind == yaml.ScalarNode && cn.Content[j+1].Value == clientName {
 					cfgOllamaClient = cn
 					cfgOllamaModels, _ = getNodeValue(cn, "models", yaml.SequenceNode)
 					verboseInfo("number of models found: %d", len(cfgOllamaModels.Content))
 				}
 			}
 		}
+	}
+	if cfgOllamaClient == nil {
+		return tracerr.Errorf("ollama client name (%s) not found", clientName)
 	}
 
 	// create ollama client
@@ -140,10 +152,10 @@ func process() error {
 			return tracerr.Wrap(err)
 		}
 		u.Path = ""
-		ollamaClient = api.NewClient(u, http.DefaultClient)
+		ollamaClient = olmapi.NewClient(u, http.DefaultClient)
 		verboseInfo("api_base found: %s", u.String())
 	} else {
-		ollamaClient, err = api.ClientFromEnvironment()
+		ollamaClient, err = olmapi.ClientFromEnvironment()
 		if err != nil {
 			return tracerr.Wrap(err)
 		}
@@ -200,7 +212,7 @@ func process() error {
 				}
 			}
 			if !found {
-				maxCtxLen, temperature, topP, err := getModelParameters(model)
+				maxCtxLen, temperature, topP, capabilities, err := getModelParameters(model)
 				if err != nil {
 					tracerr.Wrap(err)
 				}
@@ -222,6 +234,22 @@ func process() error {
 				if topP > 0 {
 					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "top_p"})
 					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: strconv.FormatFloat(topP, 'f', 1, 64)})
+				}
+				if lo.Contains(capabilities, olmmodel.CapabilityVision) {
+					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "supports_vision"})
+					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "true"})
+				}
+				if lo.Contains(capabilities, olmmodel.CapabilityTools) {
+					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "supports_function_calling"})
+					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "true"})
+				}
+				if lo.Contains(capabilities, olmmodel.CapabilityThinking) {
+					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "supports_reasoning"})
+					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "true"})
+				}
+				if lo.Contains(capabilities, olmmodel.CapabilityEmbedding) {
+					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "type"})
+					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "embedding"})
 				}
 				cfgOllamaModels.Content = append(cfgOllamaModels.Content, newNode)
 				verboseInfo("adding new model: %s", model)
@@ -285,20 +313,20 @@ func getOllamaModels() ([]string, error) {
 	if err != nil {
 		return []string{}, tracerr.Wrap(err)
 	}
-	models := lo.Map(resp.Models, func(model api.ListModelResponse, _ int) string {
+	models := lo.Map(resp.Models, func(model olmapi.ListModelResponse, _ int) string {
 		return model.Name
 	})
 	return models, nil
 }
 
-func getModelParameters(model string) (int, float64, float64, error) {
+func getModelParameters(model string) (int, float64, float64, []olmmodel.Capability, error) {
 	maxContextLength := -1
 	temperature := -1.0
 	topP := -1.0
 
 	info, err := getModelInfo(model)
 	if err != nil {
-		return maxContextLength, temperature, topP, tracerr.Wrap(err)
+		return maxContextLength, temperature, topP, nil, tracerr.Wrap(err)
 	}
 	// find the max context length
 	for key, value := range info.ModelInfo {
@@ -327,11 +355,11 @@ func getModelParameters(model string) (int, float64, float64, error) {
 			}
 		}
 	}
-	return maxContextLength, temperature, topP, nil
+	return maxContextLength, temperature, topP, info.Capabilities, nil
 }
 
-func getModelInfo(model string) (*api.ShowResponse, error) {
-	resp, err := ollamaClient.Show(context.Background(), &api.ShowRequest{Model: model})
+func getModelInfo(model string) (*olmapi.ShowResponse, error) {
+	resp, err := ollamaClient.Show(context.Background(), &olmapi.ShowRequest{Model: model})
 	if err != nil {
 		return nil, tracerr.Wrap(err)
 	}
