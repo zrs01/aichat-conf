@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -22,7 +23,8 @@ import (
 
 var (
 	version      string
-	verbose      bool
+	debug        bool
+	quiet        bool
 	cfgFile      string
 	outFile      string
 	exclude      string // models exclude
@@ -37,12 +39,6 @@ func main() {
 		Usage:   "A simple configuration tool for github.com/sigoden/aichat",
 		Version: version,
 		Flags: []cli.Flag{
-			&cli.BoolFlag{
-				Name:        "verbose",
-				Value:       false,
-				Usage:       "enable verbose output",
-				Destination: &verbose,
-			},
 			&cli.StringFlag{
 				Name:        "config",
 				Aliases:     []string{"c"},
@@ -62,9 +58,23 @@ func main() {
 				Usage:       "output file, default is stdout",
 				Destination: &outFile,
 			},
+			&cli.BoolFlag{
+				Name:        "quiet",
+				Aliases:     []string{"q"},
+				Value:       false,
+				Usage:       "suppress all information output",
+				Destination: &quiet,
+			},
+			&cli.BoolFlag{
+				Name:        "debug",
+				Aliases:     []string{"d"},
+				Required:    false,
+				Usage:       "enable debug mode",
+				Destination: &debug,
+			},
 		},
 		Action: func(context.Context, *cli.Command) error {
-			if verbose {
+			if debug {
 				logrus.SetLevel(logrus.DebugLevel)
 			}
 			return process()
@@ -72,7 +82,7 @@ func main() {
 	}
 
 	if err := cmd.Run(context.Background(), os.Args); err != nil {
-		if verbose {
+		if debug {
 			logrus.Error(tracerr.SprintSourceColor(err, 0))
 		} else {
 			logrus.Error(err)
@@ -218,6 +228,12 @@ func process() error {
 			}
 		}
 	}
+	// sort the models by name
+	sort.Slice(cfgOllamaModels.Content, func(a, b int) bool {
+		aName, _ := getNodeValue(cfgOllamaModels.Content[a], "name", yaml.ScalarNode)
+		bName, _ := getNodeValue(cfgOllamaModels.Content[b], "name", yaml.ScalarNode)
+		return aName.Value < bName.Value
+	})
 
 	/* -------------------------------------------------------------------------- */
 	/*                                   OUTPUT                                   */
@@ -259,7 +275,7 @@ func initLogrus() {
 }
 
 func verboseInfo(format string, args ...interface{}) {
-	if verbose {
+	if !quiet {
 		logrus.Infof(format, args...)
 	}
 }

@@ -15,8 +15,9 @@ A simple configuration tool for [aichat](https://github.com/sigoden/aichat) that
 - Removes obsolete models from configuration
 - Adds missing models to aichat configuration
 - Supports model exclusion via command line
-- Preserves existing configuration structure
+- Preserves existing configuration structure and comments
 - Supports writing output to file
+- Supports sorting models by name
 
 ## Installation
 
@@ -45,7 +46,8 @@ aichatconf -c /path/to/aichat/config.yaml
 - `-c, --config`: Path to aichat configuration file (required)
 - `-e, --exclude`: Comma-separated list of models to exclude
 - `-o, --output`: Output file, default is stdout
-- `-d, --debug`: Enable debug output
+- `-q, --quite`: Suppress all information output
+- `-d, --debug`: Enable debug mode
 - `-h, --help`: Show help
 
 ### Examples
@@ -59,16 +61,12 @@ aichatconf -c ~/.config/aichat/config.yaml -e "llama3,mistral"
 
 # Write output to file
 aichatconf -c ~/.config/aichat/config.yaml -o /path/to/output.yaml
-
-# Debug mode
-aichatconf -c ~/.config/aichat/config.yaml -d
 ```
 
 ## Requirements
 
 - Go 1.24.5+
 - Existing aichat configuration with an "ollama" client
-- Ollama API base URL via environment variable
 
 ## How it Works
 
@@ -76,12 +74,12 @@ aichatconf -c ~/.config/aichat/config.yaml -d
 2. Finds the "ollama" client configuration
    - Supports Ollama API base URL via environment variable
 3. Queries Ollama API for available models
-4. For each missing model:
+4. For each obsolete model, remove it from the configuration
+5. For each missing model:
    - Extracts context length from model info
    - Parses temperature and top_p from model parameters
-   - Removes obsolete models from configuration
    - Adds model to configuration
-5. Outputs updated configuration to stdout or file
+6. Outputs updated configuration to stdout or file
 
 ## Development
 
