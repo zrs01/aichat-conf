@@ -22,7 +22,7 @@ import (
 
 var (
 	version      string
-	debug        bool
+	verbose      bool
 	cfgFile      string
 	outFile      string
 	exclude      string // models exclude
@@ -38,11 +38,10 @@ func main() {
 		Version: version,
 		Flags: []cli.Flag{
 			&cli.BoolFlag{
-				Name:        "debug",
-				Aliases:     []string{"d"},
+				Name:        "verbose",
 				Value:       false,
-				Usage:       "toggle debug message",
-				Destination: &debug,
+				Usage:       "enable verbose output",
+				Destination: &verbose,
 			},
 			&cli.StringFlag{
 				Name:        "config",
@@ -65,7 +64,7 @@ func main() {
 			},
 		},
 		Action: func(context.Context, *cli.Command) error {
-			if debug {
+			if verbose {
 				logrus.SetLevel(logrus.DebugLevel)
 			}
 			return process()
@@ -73,7 +72,7 @@ func main() {
 	}
 
 	if err := cmd.Run(context.Background(), os.Args); err != nil {
-		if debug {
+		if verbose {
 			logrus.Error(tracerr.SprintSourceColor(err, 0))
 		} else {
 			logrus.Error(err)
@@ -86,7 +85,7 @@ func process() error {
 	/* -------------------------------------------------------------------------- */
 	/*                          READ AICHAT CONFIGURATION                         */
 	/* -------------------------------------------------------------------------- */
-	logrus.Debugf("reading aichat configuration from %s", cfgFile)
+	verboseInfo("reading aichat configuration from %s", cfgFile)
 	cfgBody, err := os.ReadFile(cfgFile)
 	if err != nil {
 		return tracerr.Wrap(err)
@@ -107,7 +106,7 @@ func process() error {
 	// find the clients
 	cfgClients, _ := getNodeValue(cfgDocNode.Content[0], "clients", yaml.SequenceNode)
 	cfgOllamaClient := &yaml.Node{}
-	logrus.Debugf("number of clients found: %d", len(cfgClients.Content))
+	verboseInfo("number of clients found: %d", len(cfgClients.Content))
 
 	// find the ollama client and its models
 	cfgOllamaModels := &yaml.Node{}
@@ -117,7 +116,7 @@ func process() error {
 				if cn.Content[j+1].Kind == yaml.ScalarNode && cn.Content[j+1].Value == "ollama" {
 					cfgOllamaClient = cn
 					cfgOllamaModels, _ = getNodeValue(cn, "models", yaml.SequenceNode)
-					logrus.Debugf("number of models found: %d", len(cfgOllamaModels.Content))
+					verboseInfo("number of models found: %d", len(cfgOllamaModels.Content))
 				}
 			}
 		}
@@ -132,7 +131,7 @@ func process() error {
 		}
 		u.Path = ""
 		ollamaClient = api.NewClient(u, http.DefaultClient)
-		logrus.Debugf("api_base found: %s", u.String())
+		verboseInfo("api_base found: %s", u.String())
 	} else {
 		ollamaClient, err = api.ClientFromEnvironment()
 		if err != nil {
@@ -156,7 +155,7 @@ func process() error {
 		ollamaModels = lo.Filter(ollamaModels, func(model string, _ int) bool {
 			for _, excludeModel := range excludeModels {
 				if strings.Contains(model, excludeModel) {
-					logrus.Debugf("excluding model: %s", model)
+					verboseInfo("excluding model: %s", model)
 					return false
 				}
 			}
@@ -173,7 +172,7 @@ func process() error {
 				if lo.Contains(ollamaModels, cfgModelName.Value) {
 					newModels = append(newModels, cfgModel)
 				} else {
-					logrus.Debugf("removing obsolete model: %s", cfgModelName.Value)
+					verboseInfo("removing obsolete model: %s", cfgModelName.Value)
 				}
 			}
 		}
@@ -215,7 +214,7 @@ func process() error {
 					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: strconv.FormatFloat(topP, 'f', 1, 64)})
 				}
 				cfgOllamaModels.Content = append(cfgOllamaModels.Content, newNode)
-				logrus.Debugf("adding new model: %s", model)
+				verboseInfo("adding new model: %s", model)
 			}
 		}
 	}
@@ -229,10 +228,10 @@ func process() error {
 	}
 	outstr := strings.TrimSpace(string(outbytes))
 	if outFile != "" {
-		logrus.Debugf("writing output to %s", outFile)
+		verboseInfo("writing output to %s", outFile)
 		return os.WriteFile(outFile, []byte(outstr), 0644)
 	} else {
-		logrus.Debugf("writing output to stdout")
+		verboseInfo("writing output to stdout")
 		fmt.Printf("%s\n", string(outstr))
 	}
 
@@ -257,6 +256,12 @@ func initLogrus() {
 		HideKeys:        true,
 		TimestampFormat: time.RFC3339,
 	})
+}
+
+func verboseInfo(format string, args ...interface{}) {
+	if verbose {
+		logrus.Infof(format, args...)
+	}
 }
 
 func getOllamaModels() ([]string, error) {
