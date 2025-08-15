@@ -4,6 +4,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -19,10 +21,12 @@ import (
 )
 
 var (
-	version string
-	debug   bool
-	cfgFile string
-	exclude string // models exclude
+	version      string
+	debug        bool
+	cfgFile      string
+	outFile      string
+	exclude      string // models exclude
+	ollamaClient *api.Client
 )
 
 func main() {
@@ -53,8 +57,17 @@ func main() {
 				Usage:       "models exclude, split by comma",
 				Destination: &exclude,
 			},
+			&cli.StringFlag{
+				Name:        "output",
+				Aliases:     []string{"o"},
+				Usage:       "output file, default is stdout",
+				Destination: &outFile,
+			},
 		},
 		Action: func(context.Context, *cli.Command) error {
+			if debug {
+				logrus.SetLevel(logrus.DebugLevel)
+			}
 			return process()
 		},
 	}
@@ -73,10 +86,16 @@ func process() error {
 	/* -------------------------------------------------------------------------- */
 	/*                          READ AICHAT CONFIGURATION                         */
 	/* -------------------------------------------------------------------------- */
+	logrus.Debugf("reading aichat configuration from %s", cfgFile)
 	cfgBody, err := os.ReadFile(cfgFile)
 	if err != nil {
 		return tracerr.Wrap(err)
 	}
+	// prepend "---" to the file if missing to preserve first line comments in YAML after unmarshal
+	if len(cfgBody) >= 3 && string(cfgBody[:3]) != "---" {
+		cfgBody = []byte("---\n" + string(cfgBody))
+	}
+
 	// use yaml.Node type to unmarshal in order to keep the comment
 	var cfgDocNode yaml.Node
 	if err := yaml.Unmarshal(cfgBody, &cfgDocNode); err != nil {
@@ -86,16 +105,38 @@ func process() error {
 		return tracerr.New("empty config file")
 	}
 	// find the clients
-	cfgClientNode, _ := getNodeValue(cfgDocNode.Content[0], "clients", yaml.SequenceNode)
+	cfgClients, _ := getNodeValue(cfgDocNode.Content[0], "clients", yaml.SequenceNode)
+	cfgOllamaClient := &yaml.Node{}
+	logrus.Debugf("number of clients found: %d", len(cfgClients.Content))
 
+	// find the ollama client and its models
 	cfgOllamaModels := &yaml.Node{}
-	for _, cn := range cfgClientNode.Content {
+	for _, cn := range cfgClients.Content {
 		for j, node := range cn.Content {
 			if node.Kind == yaml.ScalarNode && node.Value == "name" {
 				if cn.Content[j+1].Kind == yaml.ScalarNode && cn.Content[j+1].Value == "ollama" {
+					cfgOllamaClient = cn
 					cfgOllamaModels, _ = getNodeValue(cn, "models", yaml.SequenceNode)
+					logrus.Debugf("number of models found: %d", len(cfgOllamaModels.Content))
 				}
 			}
+		}
+	}
+
+	// create ollama client
+	if apiBaseNode, ok := getNodeValue(cfgOllamaClient, "api_base", yaml.ScalarNode); ok {
+		// remove the path
+		u, err := url.Parse(apiBaseNode.Value)
+		if err != nil {
+			return tracerr.Wrap(err)
+		}
+		u.Path = ""
+		ollamaClient = api.NewClient(u, http.DefaultClient)
+		logrus.Debugf("api_base found: %s", u.String())
+	} else {
+		ollamaClient, err = api.ClientFromEnvironment()
+		if err != nil {
+			return tracerr.Wrap(err)
 		}
 	}
 
@@ -115,6 +156,7 @@ func process() error {
 		ollamaModels = lo.Filter(ollamaModels, func(model string, _ int) bool {
 			for _, excludeModel := range excludeModels {
 				if strings.Contains(model, excludeModel) {
+					logrus.Debugf("excluding model: %s", model)
 					return false
 				}
 			}
@@ -130,6 +172,8 @@ func process() error {
 			if ok {
 				if lo.Contains(ollamaModels, cfgModelName.Value) {
 					newModels = append(newModels, cfgModel)
+				} else {
+					logrus.Debugf("removing obsolete model: %s", cfgModelName.Value)
 				}
 			}
 		}
@@ -171,19 +215,7 @@ func process() error {
 					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: strconv.FormatFloat(topP, 'f', 1, 64)})
 				}
 				cfgOllamaModels.Content = append(cfgOllamaModels.Content, newNode)
-			}
-		}
-	}
-
-	/* -------------------------------------------------------------------------- */
-	/*                         UPDATE AICHAT CONFIGURATION                        */
-	/* -------------------------------------------------------------------------- */
-	for i, cn := range cfgClientNode.Content {
-		for j, node := range cn.Content {
-			if node.Kind == yaml.ScalarNode && node.Value == "name" {
-				if cn.Content[j+1].Kind == yaml.ScalarNode && cn.Content[j+1].Value == "ollama" {
-					setNodeValue(cfgClientNode.Content[i].Content[j+2], "models", cfgOllamaModels)
-				}
+				logrus.Debugf("adding new model: %s", model)
 			}
 		}
 	}
@@ -191,11 +223,18 @@ func process() error {
 	/* -------------------------------------------------------------------------- */
 	/*                                   OUTPUT                                   */
 	/* -------------------------------------------------------------------------- */
-	out, err := yaml.Marshal(cfgDocNode.Content[0])
+	outbytes, err := yaml.Marshal(cfgDocNode.Content[0])
 	if err != nil {
 		return tracerr.Wrap(err)
 	}
-	fmt.Printf("\n%s", string(out))
+	outstr := strings.TrimSpace(string(outbytes))
+	if outFile != "" {
+		logrus.Debugf("writing output to %s", outFile)
+		return os.WriteFile(outFile, []byte(outstr), 0644)
+	} else {
+		logrus.Debugf("writing output to stdout")
+		fmt.Printf("%s\n", string(outstr))
+	}
 
 	return nil
 }
@@ -213,19 +252,6 @@ func getNodeValue(node *yaml.Node, key string, valueKind yaml.Kind) (*yaml.Node,
 	return &yaml.Node{Kind: valueKind}, false
 }
 
-func setNodeValue(node *yaml.Node, key string, value *yaml.Node) {
-	for i, childNode := range node.Content {
-		if childNode.Kind == yaml.ScalarNode && childNode.Value == key {
-			if i+1 < len(node.Content) {
-				node.Content[i+1] = value
-				return
-			}
-		}
-	}
-	node.Content = append(node.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: key})
-	node.Content = append(node.Content, value)
-}
-
 func initLogrus() {
 	logrus.SetFormatter(&nested.Formatter{
 		HideKeys:        true,
@@ -234,11 +260,7 @@ func initLogrus() {
 }
 
 func getOllamaModels() ([]string, error) {
-	client, err := api.ClientFromEnvironment()
-	if err != nil {
-		return []string{}, tracerr.Wrap(err)
-	}
-	resp, err := client.List(context.Background())
+	resp, err := ollamaClient.List(context.Background())
 	if err != nil {
 		return []string{}, tracerr.Wrap(err)
 	}
@@ -288,11 +310,7 @@ func getModelParameters(model string) (int, float64, float64, error) {
 }
 
 func getModelInfo(model string) (*api.ShowResponse, error) {
-	client, err := api.ClientFromEnvironment()
-	if err != nil {
-		return nil, tracerr.Wrap(err)
-	}
-	resp, err := client.Show(context.Background(), &api.ShowRequest{Model: model})
+	resp, err := ollamaClient.Show(context.Background(), &api.ShowRequest{Model: model})
 	if err != nil {
 		return nil, tracerr.Wrap(err)
 	}
