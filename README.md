@@ -8,13 +8,14 @@ A simple configuration tool for [aichat](https://github.com/sigoden/aichat) that
 
 ## Features
 
-- Automatically discovers Ollama models
+- Automatically discovers and syncs Ollama models
 - Supports Ollama running locally
 - Supports Ollama API base URL via environment variable
 - Extracts model parameters from Ollama model info
 - Removes obsolete models from configuration
 - Adds missing models to aichat configuration
 - Supports model exclusion via command line
+- Supports default model setting via command line
 - Preserves existing configuration structure and comments
 - Supports writing output to file
 - Supports sorting models by name
@@ -45,6 +46,7 @@ aichatconf -c /path/to/aichat/config.yaml
 
 - `-c, --config`: Path to aichat configuration file (required)
 - `-n, --client`: Client name, default is "ollama"
+- `-m, --model`: Default model name
 - `-e, --exclude`: Comma-separated list of models to exclude
 - `-o, --output`: Output file, default is stdout
 - `-q, --quite`: Suppress all information output
@@ -56,6 +58,9 @@ aichatconf -c /path/to/aichat/config.yaml
 ```bash
 # Basic usage
 aichatconf -c ~/.config/aichat/config.yaml
+
+# Set default model
+aichatconf -c ~/.config/aichat/config.yaml -m llama3
 
 # Exclude specific models
 aichatconf -c ~/.config/aichat/config.yaml -e "llama3,mistral"
@@ -80,7 +85,9 @@ aichatconf -c ~/.config/aichat/config.yaml -o /path/to/output.yaml
    - Extracts context length from model info
    - Parses temperature and top_p from model parameters
    - Adds model to configuration
-6. Outputs updated configuration to stdout or file
+6. Sorts models by name
+7. Sets the default model if it is not in the list
+8. Outputs updated configuration to stdout or file
 
 ## Development
 
