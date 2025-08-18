@@ -30,6 +30,7 @@ var (
 	clientName   string
 	outFile      string
 	exclude      string // models exclude
+	defModel     string // default model
 	ollamaClient *olmapi.Client
 )
 
@@ -54,6 +55,12 @@ func main() {
 				Value:       "ollama",
 				Usage:       "client name",
 				Destination: &clientName,
+			},
+			&cli.StringFlag{
+				Name:        "model",
+				Aliases:     []string{"m"},
+				Usage:       "default model",
+				Destination: &defModel,
 			},
 			&cli.StringFlag{
 				Name:        "exclude",
@@ -104,7 +111,7 @@ func process() error {
 	/* -------------------------------------------------------------------------- */
 	/*                          READ AICHAT CONFIGURATION                         */
 	/* -------------------------------------------------------------------------- */
-	verboseInfo("reading aichat configuration from %s", cfgFile)
+	verboseInfo("aichat configuration read: %s", cfgFile)
 	cfgBody, err := os.ReadFile(cfgFile)
 	if err != nil {
 		return tracerr.Wrap(err)
@@ -122,10 +129,12 @@ func process() error {
 	if len(cfgDocNode.Content) == 0 {
 		return tracerr.New("empty config file")
 	}
+	// find the default model
+	cfgDefModel, _ := getNodeValue(cfgDocNode.Content[0], "model", yaml.ScalarNode)
 	// find the clients
 	cfgClients, _ := getNodeValue(cfgDocNode.Content[0], "clients", yaml.SequenceNode)
 	var cfgOllamaClient *yaml.Node = nil
-	verboseInfo("number of clients found: %d", len(cfgClients.Content))
+	verboseInfo("clients found: %d", len(cfgClients.Content))
 
 	// find the ollama client and its models
 	cfgOllamaModels := &yaml.Node{}
@@ -135,7 +144,7 @@ func process() error {
 				if cn.Content[j+1].Kind == yaml.ScalarNode && cn.Content[j+1].Value == clientName {
 					cfgOllamaClient = cn
 					cfgOllamaModels, _ = getNodeValue(cn, "models", yaml.SequenceNode)
-					verboseInfo("number of models found: %d", len(cfgOllamaModels.Content))
+					verboseInfo("models found: %d", len(cfgOllamaModels.Content))
 				}
 			}
 		}
@@ -177,7 +186,7 @@ func process() error {
 		ollamaModels = lo.Filter(ollamaModels, func(model string, _ int) bool {
 			for _, excludeModel := range excludeModels {
 				if strings.Contains(model, excludeModel) {
-					verboseInfo("excluding model: %s", model)
+					verboseInfo("model excluded: %s", model)
 					return false
 				}
 			}
@@ -194,7 +203,7 @@ func process() error {
 				if lo.Contains(ollamaModels, cfgModelName.Value) {
 					newModels = append(newModels, cfgModel)
 				} else {
-					verboseInfo("removing obsolete model: %s", cfgModelName.Value)
+					verboseInfo("obsolete model removed: %s", cfgModelName.Value)
 				}
 			}
 		}
@@ -252,7 +261,7 @@ func process() error {
 					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "embedding"})
 				}
 				cfgOllamaModels.Content = append(cfgOllamaModels.Content, newNode)
-				verboseInfo("adding new model: %s", model)
+				verboseInfo("model added: %s", model)
 			}
 		}
 	}
@@ -262,6 +271,32 @@ func process() error {
 		bName, _ := getNodeValue(cfgOllamaModels.Content[b], "name", yaml.ScalarNode)
 		return aName.Value < bName.Value
 	})
+	// set the valid default model if it is not in the list
+	{
+		var desiredModel string
+		found := false
+		for _, cfgModel := range cfgOllamaModels.Content {
+			cfgModelName, ok := getNodeValue(cfgModel, "name", yaml.ScalarNode)
+			if ok {
+				if cfgModelName.Value == cfgDefModel.Value {
+					found = true
+				}
+				if desiredModel == "" && strings.Contains(cfgModelName.Value, defModel) {
+					desiredModel = cfgModelName.Value
+				}
+			}
+		}
+		if desiredModel != "" {
+			cfgDefModel.Value = fmt.Sprintf("%s:%s", clientName, desiredModel)
+			verboseInfo("default model set: %s", cfgDefModel.Value)
+		} else {
+			if !found {
+				// replace the default model
+				cfgDefModel.Value = fmt.Sprintf("%s:%s", clientName, cfgOllamaModels.Content[0].Content[1].Value)
+				verboseInfo("default model set: %s", cfgDefModel.Value)
+			}
+		}
+	}
 
 	/* -------------------------------------------------------------------------- */
 	/*                                   OUTPUT                                   */
@@ -272,10 +307,10 @@ func process() error {
 	}
 	outstr := strings.TrimSpace(string(outbytes))
 	if outFile != "" {
-		verboseInfo("writing output to %s", outFile)
+		verboseInfo("output wrote: %s", outFile)
 		return os.WriteFile(outFile, []byte(outstr), 0644)
 	} else {
-		verboseInfo("writing output to stdout")
+		verboseInfo("output wrote: stdout")
 		fmt.Printf("%s\n", string(outstr))
 	}
 
