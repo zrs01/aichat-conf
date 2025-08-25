@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,15 +24,15 @@ import (
 )
 
 var (
-	version      string
-	debug        bool
-	quiet        bool
-	cfgFile      string
-	clientName   string
-	outFile      string
-	exclude      string // models exclude
-	defModel     string // default model
-	ollamaClient *olmapi.Client
+	version       string
+	optDebug      bool
+	optQuiet      bool
+	optCfgFile    string
+	optClientName string
+	optOutFile    string
+	optExclude    string // models exclude
+	optDefModel   string // default model
+	ollamaClient  *olmapi.Client
 )
 
 func main() {
@@ -47,50 +48,49 @@ func main() {
 				Aliases:     []string{"c"},
 				Required:    true,
 				Usage:       "config file of aichat",
-				Destination: &cfgFile,
+				Destination: &optCfgFile,
 			},
 			&cli.StringFlag{
 				Name:        "client",
 				Aliases:     []string{"n"},
-				Value:       "ollama",
 				Usage:       "client name",
-				Destination: &clientName,
+				Destination: &optClientName,
 			},
 			&cli.StringFlag{
 				Name:        "model",
 				Aliases:     []string{"m"},
 				Usage:       "default model",
-				Destination: &defModel,
+				Destination: &optDefModel,
 			},
 			&cli.StringFlag{
 				Name:        "exclude",
 				Aliases:     []string{"e"},
 				Usage:       "models exclude, split by comma",
-				Destination: &exclude,
+				Destination: &optExclude,
 			},
 			&cli.StringFlag{
 				Name:        "output",
 				Aliases:     []string{"o"},
 				Usage:       "output file, default is stdout",
-				Destination: &outFile,
+				Destination: &optOutFile,
 			},
 			&cli.BoolFlag{
 				Name:        "quiet",
 				Aliases:     []string{"q"},
 				Value:       false,
 				Usage:       "suppress all information output",
-				Destination: &quiet,
+				Destination: &optQuiet,
 			},
 			&cli.BoolFlag{
 				Name:        "debug",
 				Aliases:     []string{"d"},
 				Required:    false,
 				Usage:       "enable debug mode",
-				Destination: &debug,
+				Destination: &optDebug,
 			},
 		},
 		Action: func(context.Context, *cli.Command) error {
-			if debug {
+			if optDebug {
 				logrus.SetLevel(logrus.DebugLevel)
 			}
 			return process()
@@ -98,7 +98,7 @@ func main() {
 	}
 
 	if err := cmd.Run(context.Background(), os.Args); err != nil {
-		if debug {
+		if optDebug {
 			logrus.Error(tracerr.SprintSourceColor(err, 0))
 		} else {
 			logrus.Error(err)
@@ -111,8 +111,8 @@ func process() error {
 	/* -------------------------------------------------------------------------- */
 	/*                          READ AICHAT CONFIGURATION                         */
 	/* -------------------------------------------------------------------------- */
-	verboseInfo("aichat configuration read: %s", cfgFile)
-	cfgBody, err := os.ReadFile(cfgFile)
+	verboseInfo("aichat configuration read: %s", optCfgFile)
+	cfgBody, err := os.ReadFile(optCfgFile)
 	if err != nil {
 		return tracerr.Wrap(err)
 	}
@@ -129,19 +129,39 @@ func process() error {
 	if len(cfgDocNode.Content) == 0 {
 		return tracerr.New("empty config file")
 	}
-	// find the default model
-	cfgDefModel, _ := getNodeValue(cfgDocNode.Content[0], "model", yaml.ScalarNode)
+
+	// find the default client and model
+	var cfgDefModelClient, cfgDefModelName string
+	var cfgDefModelNode *yaml.Node
+	{
+		node, ok := getNodeValue(cfgDocNode.Content[0], "model", yaml.ScalarNode)
+		if ok {
+			re := regexp.MustCompile(`^([^:]+):(.+)$`)
+			match := re.FindStringSubmatch(node.Value)
+			if len(match) > 2 {
+				cfgDefModelNode = node
+				cfgDefModelClient = strings.TrimSpace(match[1])
+				cfgDefModelName = strings.TrimSpace(match[2])
+			}
+		}
+	}
+
+	verboseInfo("default model found: %s:%s", cfgDefModelClient, cfgDefModelName)
 	// find the clients
 	cfgClients, _ := getNodeValue(cfgDocNode.Content[0], "clients", yaml.SequenceNode)
 	var cfgOllamaClient *yaml.Node = nil
 	verboseInfo("clients found: %d", len(cfgClients.Content))
 
 	// find the ollama client and its models
+	if optClientName == "" {
+		// use client in the model as default if user does not provided
+		optClientName = cfgDefModelClient
+	}
 	cfgOllamaModels := &yaml.Node{}
 	for _, cn := range cfgClients.Content {
 		for j, node := range cn.Content {
 			if node.Kind == yaml.ScalarNode && node.Value == "name" {
-				if cn.Content[j+1].Kind == yaml.ScalarNode && cn.Content[j+1].Value == clientName {
+				if cn.Content[j+1].Kind == yaml.ScalarNode && cn.Content[j+1].Value == optClientName {
 					cfgOllamaClient = cn
 					cfgOllamaModels, _ = getNodeValue(cn, "models", yaml.SequenceNode)
 					verboseInfo("models found: %d", len(cfgOllamaModels.Content))
@@ -150,7 +170,7 @@ func process() error {
 		}
 	}
 	if cfgOllamaClient == nil {
-		return tracerr.Errorf("ollama client name (%s) not found", clientName)
+		return tracerr.Errorf("ollama client name (%s) not found", optClientName)
 	}
 
 	// create ollama client
@@ -178,8 +198,8 @@ func process() error {
 		return tracerr.Wrap(err)
 	}
 	// exclude models
-	if exclude != "" {
-		excludeModels := strings.Split(exclude, ",")
+	if optExclude != "" {
+		excludeModels := strings.Split(optExclude, ",")
 		lo.ForEach(excludeModels, func(model string, _ int) {
 			model = strings.TrimSpace(model)
 		})
@@ -203,7 +223,7 @@ func process() error {
 				if lo.Contains(ollamaModels, cfgModelName.Value) {
 					newModels = append(newModels, cfgModel)
 				} else {
-					verboseInfo("obsolete model removed: %s", cfgModelName.Value)
+					verboseInfo("remove model: %s", cfgModelName.Value)
 				}
 			}
 		}
@@ -261,7 +281,7 @@ func process() error {
 					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "embedding"})
 				}
 				cfgOllamaModels.Content = append(cfgOllamaModels.Content, newNode)
-				verboseInfo("model added: %s", model)
+				verboseInfo("add model: %s", model)
 			}
 		}
 	}
@@ -274,26 +294,27 @@ func process() error {
 	// set the valid default model if it is not in the list
 	{
 		var desiredModel string
-		found := false
+		cfgDefModelFound := false
 		for _, cfgModel := range cfgOllamaModels.Content {
 			cfgModelName, ok := getNodeValue(cfgModel, "name", yaml.ScalarNode)
 			if ok {
-				if cfgModelName.Value == cfgDefModel.Value {
-					found = true
+				if cfgModelName.Value == cfgDefModelName {
+					cfgDefModelFound = true
 				}
-				if desiredModel == "" && strings.Contains(cfgModelName.Value, defModel) {
+				// save first matched model only if user provided desired model
+				if optDefModel != "" && desiredModel == "" && strings.Contains(cfgModelName.Value, optDefModel) {
 					desiredModel = cfgModelName.Value
 				}
 			}
 		}
 		if desiredModel != "" {
-			cfgDefModel.Value = fmt.Sprintf("%s:%s", clientName, desiredModel)
-			verboseInfo("default model set: %s", cfgDefModel.Value)
+			cfgDefModelName = fmt.Sprintf("%s:%s", optClientName, desiredModel)
+			verboseInfo("set default model: %s", cfgDefModelName)
 		} else {
-			if !found {
+			if !cfgDefModelFound {
 				// replace the default model
-				cfgDefModel.Value = fmt.Sprintf("%s:%s", clientName, cfgOllamaModels.Content[0].Content[1].Value)
-				verboseInfo("default model set: %s", cfgDefModel.Value)
+				cfgDefModelNode.Value = fmt.Sprintf("%s:%s", optClientName, cfgOllamaModels.Content[0].Content[1].Value)
+				verboseInfo("set default model: %s", cfgDefModelName)
 			}
 		}
 	}
@@ -306,11 +327,11 @@ func process() error {
 		return tracerr.Wrap(err)
 	}
 	outstr := strings.TrimSpace(string(outbytes))
-	if outFile != "" {
-		verboseInfo("output wrote: %s", outFile)
-		return os.WriteFile(outFile, []byte(outstr), 0644)
+	if optOutFile != "" {
+		verboseInfo("output: %s", optOutFile)
+		return os.WriteFile(optOutFile, []byte(outstr), 0644)
 	} else {
-		verboseInfo("output wrote: stdout")
+		verboseInfo("output: stdout")
 		fmt.Printf("%s\n", string(outstr))
 	}
 
@@ -338,7 +359,7 @@ func initLogrus() {
 }
 
 func verboseInfo(format string, args ...interface{}) {
-	if !quiet {
+	if !optQuiet {
 		logrus.Infof(format, args...)
 	}
 }
