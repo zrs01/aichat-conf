@@ -206,7 +206,7 @@ func process() error {
 		ollamaModels = lo.Filter(ollamaModels, func(model string, _ int) bool {
 			for _, excludeModel := range excludeModels {
 				if strings.Contains(model, excludeModel) {
-					verboseInfo("model excluded: %s", model)
+					verboseInfo("exclude model: %s", model)
 					return false
 				}
 			}
@@ -309,6 +309,7 @@ func process() error {
 		}
 		if desiredModel != "" {
 			cfgDefModelName = fmt.Sprintf("%s:%s", optClientName, desiredModel)
+			cfgDefModelNode.Value = fmt.Sprintf("%s:%s", optClientName, desiredModel)
 			verboseInfo("set default model: %s", cfgDefModelName)
 		} else {
 			if !cfgDefModelFound {
@@ -328,10 +329,10 @@ func process() error {
 	}
 	outstr := strings.TrimSpace(string(outbytes))
 	if optOutFile != "" {
-		verboseInfo("output: %s", optOutFile)
+		verboseInfo("write to: %s", optOutFile)
 		return os.WriteFile(optOutFile, []byte(outstr), 0644)
 	} else {
-		verboseInfo("output: stdout")
+		verboseInfo("write to: stdout")
 		fmt.Printf("%s\n", string(outstr))
 	}
 
