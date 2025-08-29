@@ -14,6 +14,7 @@ import (
 	"time"
 
 	nested "github.com/antonfisher/nested-logrus-formatter"
+	"github.com/ollama/ollama/api"
 	olmapi "github.com/ollama/ollama/api"
 	olmmodel "github.com/ollama/ollama/types/model"
 	"github.com/samber/lo"
@@ -174,20 +175,25 @@ func process() error {
 	}
 
 	// create ollama client
-	if apiBaseNode, ok := getNodeValue(cfgOllamaClient, "api_base", yaml.ScalarNode); ok {
-		// remove the path
-		u, err := url.Parse(apiBaseNode.Value)
+	{
+		cfgOllamaAPIKey := ""
+		if apiKeyNode, ok := getNodeValue(cfgOllamaClient, "api_key", yaml.ScalarNode); ok {
+			cfgOllamaAPIKey = apiKeyNode.Value
+			verboseInfo("api_key found")
+		}
+
+		cfgOllamaAPIBase := ""
+		if apiBaseNode, ok := getNodeValue(cfgOllamaClient, "api_base", yaml.ScalarNode); ok {
+			cfgOllamaAPIBase = apiBaseNode.Value
+			verboseInfo("api_base found: %s", cfgOllamaAPIBase)
+		} else {
+			verboseInfo("api_base not found, use default")
+		}
+		c, err := createOllamaClient(cfgOllamaAPIBase, cfgOllamaAPIKey)
 		if err != nil {
 			return tracerr.Wrap(err)
 		}
-		u.Path = ""
-		ollamaClient = olmapi.NewClient(u, http.DefaultClient)
-		verboseInfo("api_base found: %s", u.String())
-	} else {
-		ollamaClient, err = olmapi.ClientFromEnvironment()
-		if err != nil {
-			return tracerr.Wrap(err)
-		}
+		ollamaClient = c
 	}
 
 	/* -------------------------------------------------------------------------- */
@@ -359,7 +365,7 @@ func initLogrus() {
 	})
 }
 
-func verboseInfo(format string, args ...interface{}) {
+func verboseInfo(format string, args ...any) {
 	if !optQuiet {
 		logrus.Infof(format, args...)
 	}
@@ -421,4 +427,61 @@ func getModelInfo(model string) (*olmapi.ShowResponse, error) {
 		return nil, tracerr.Wrap(err)
 	}
 	return resp, nil
+}
+
+/* -------------------------------------------------------------------------- */
+/*                     OLLAMA CLIENT WITH API KEY SUPPORT                     */
+/* -------------------------------------------------------------------------- */
+
+// apiKeyTransport adds the API_KEY header to every request.
+type apiKeyTransport struct {
+	rt     http.RoundTripper // the underlying transport
+	apiKey string            // the value you want to send
+}
+
+// RoundTrip implements http.RoundTripper.
+func (t *apiKeyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Clone the request so we don't mutate the caller's request
+	// (recommended by the net/http docs for RoundTripper wrappers).
+	req2 := req.Clone(req.Context())
+
+	// Add the header – you can use Add, Set or Direct assignment.
+	req2.Header.Set("Authorization", fmt.Sprintf("Bearer %s", t.apiKey))
+
+	// Pass the request on to the wrapped RoundTripper.
+	return t.rt.RoundTrip(req2)
+}
+
+func createOllamaClient(apiBase, apiKey string) (*api.Client, error) {
+	// Use http.DefaultTransport if you don't need custom TLS settings.
+	// If you do need TLS or proxy config, create your own *http.Transport.
+	base := http.DefaultTransport
+
+	// Wrap it
+	wrapped := &apiKeyTransport{
+		rt:     base,
+		apiKey: apiKey,
+	}
+
+	httpClient := &http.Client{
+		Transport: wrapped,
+	}
+
+	var client *api.Client
+	if apiBase != "" {
+		// remove the path
+		u, err := url.Parse(apiBase)
+		if err != nil {
+			return nil, tracerr.Wrap(err)
+		}
+		u.Path = ""
+		client = olmapi.NewClient(u, httpClient)
+	} else {
+		c, err := olmapi.ClientFromEnvironment()
+		if err != nil {
+			return nil, tracerr.Wrap(err)
+		}
+		client = c
+	}
+	return client, nil
 }
