@@ -158,20 +158,31 @@ func process() error {
 		// use client in the model as default if user does not provided
 		optClientName = cfgDefModelClient
 	}
-	cfgOllamaModels := &yaml.Node{}
+	var cfgOllamaModels *yaml.Node
 	for _, cn := range cfgClients.Content {
 		for j, node := range cn.Content {
 			if node.Kind == yaml.ScalarNode && node.Value == "name" {
 				if cn.Content[j+1].Kind == yaml.ScalarNode && cn.Content[j+1].Value == optClientName {
 					cfgOllamaClient = cn
 					cfgOllamaModels, _ = getNodeValue(cn, "models", yaml.SequenceNode)
-					verboseInfo("models found: %d", len(cfgOllamaModels.Content))
+					if cfgOllamaModels == nil {
+						verboseInfo("models found: 0")
+					} else {
+						verboseInfo("models found: %d", len(cfgOllamaModels.Content))
+					}
 				}
 			}
 		}
 	}
 	if cfgOllamaClient == nil {
 		return tracerr.Errorf("ollama client name (%s) not found", optClientName)
+	}
+	// create model node if not exists
+	if cfgOllamaModels == nil {
+		cfgOllamaModels = &yaml.Node{Kind: yaml.SequenceNode, Content: []*yaml.Node{}}
+		cfgOllamaClient.Content = append(cfgOllamaClient.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "models"})
+		cfgOllamaClient.Content = append(cfgOllamaClient.Content, cfgOllamaModels)
+		verboseInfo("models node created")
 	}
 
 	// create ollama client
@@ -253,39 +264,30 @@ func process() error {
 					tracerr.Wrap(err)
 				}
 				newNode := &yaml.Node{
-					Kind: yaml.MappingNode,
-					Content: []*yaml.Node{
-						{Kind: yaml.ScalarNode, Value: "name"},
-						{Kind: yaml.ScalarNode, Value: model},
-					},
+					Kind:    yaml.MappingNode,
+					Content: []*yaml.Node{},
 				}
+				setNodeKeyValue(newNode, yaml.ScalarNode, "name", yaml.ScalarNode, model)
 				if maxCtxLen > 0 {
-					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "max_input_tokens"})
-					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: strconv.Itoa(maxCtxLen)})
+					setNodeKeyValue(newNode, yaml.ScalarNode, "max_input_tokens", yaml.ScalarNode, strconv.Itoa(maxCtxLen))
 				}
 				if temperature > 0 {
-					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "temperature"})
-					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: strconv.FormatFloat(temperature, 'f', 1, 64)})
+					setNodeKeyValue(newNode, yaml.ScalarNode, "temperature", yaml.ScalarNode, strconv.FormatFloat(temperature, 'f', 1, 64))
 				}
 				if topP > 0 {
-					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "top_p"})
-					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: strconv.FormatFloat(topP, 'f', 1, 64)})
+					setNodeKeyValue(newNode, yaml.ScalarNode, "top_p", yaml.ScalarNode, strconv.FormatFloat(topP, 'f', 1, 64))
 				}
 				if lo.Contains(capabilities, olmmodel.CapabilityVision) {
-					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "supports_vision"})
-					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "true"})
+					setNodeKeyValue(newNode, yaml.ScalarNode, "supports_vision", yaml.ScalarNode, "true")
 				}
 				if lo.Contains(capabilities, olmmodel.CapabilityTools) {
-					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "supports_function_calling"})
-					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "true"})
+					setNodeKeyValue(newNode, yaml.ScalarNode, "supports_function_calling", yaml.ScalarNode, "true")
 				}
 				if lo.Contains(capabilities, olmmodel.CapabilityThinking) {
-					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "supports_reasoning"})
-					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "true"})
+					setNodeKeyValue(newNode, yaml.ScalarNode, "supports_reasoning", yaml.ScalarNode, "true")
 				}
 				if lo.Contains(capabilities, olmmodel.CapabilityEmbedding) {
-					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "type"})
-					newNode.Content = append(newNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "embedding"})
+					setNodeKeyValue(newNode, yaml.ScalarNode, "type", yaml.ScalarNode, "embedding")
 				}
 				cfgOllamaModels.Content = append(cfgOllamaModels.Content, newNode)
 				verboseInfo("add model: %s", model)
@@ -347,7 +349,16 @@ func getNodeValue(node *yaml.Node, key string, valueKind yaml.Kind) (*yaml.Node,
 			}
 		}
 	}
-	return &yaml.Node{Kind: valueKind}, false
+	return nil, false
+}
+
+func setNodeValue(node *yaml.Node, kind yaml.Kind, value string) {
+	node.Content = append(node.Content, &yaml.Node{Kind: kind, Value: value})
+}
+
+func setNodeKeyValue(node *yaml.Node, keyKind yaml.Kind, key string, valueKind yaml.Kind, value string) {
+	setNodeValue(node, keyKind, key)
+	setNodeValue(node, valueKind, value)
 }
 
 func initLogrus() {
