@@ -203,6 +203,7 @@ func process() error {
 	if err != nil {
 		return tracerr.Wrap(err)
 	}
+	verboseInfo("ollama models found: %d", len(ollamaModels))
 	// exclude models
 	if optExclude != "" {
 		excludeModels := strings.Split(optExclude, ",")
@@ -297,19 +298,14 @@ func process() error {
 		bName, _ := getNodeValue(cfgOllamaModels.Content[b], "name", yaml.ScalarNode)
 		return aName.Value < bName.Value
 	})
-	// set the valid default model if it is not in the list
-	{
+	if optDefModel != "" {
 		var desiredModel string
-		cfgDefModelFound := false
 		for _, cfgModel := range cfgOllamaModels.Content {
 			cfgModelName, ok := getNodeValue(cfgModel, "name", yaml.ScalarNode)
 			if ok {
-				if cfgModelName.Value == cfgDefModelName {
-					cfgDefModelFound = true
-				}
-				// save first matched model only if user provided desired model
-				if optDefModel != "" && desiredModel == "" && strings.Contains(cfgModelName.Value, optDefModel) {
+				if strings.Contains(cfgModelName.Value, optDefModel) {
 					desiredModel = cfgModelName.Value
+					break
 				}
 			}
 		}
@@ -318,11 +314,7 @@ func process() error {
 			cfgDefModelNode.Value = fmt.Sprintf("%s:%s", optClientName, desiredModel)
 			verboseInfo("set default model: %s", cfgDefModelName)
 		} else {
-			if !cfgDefModelFound {
-				// replace the default model
-				cfgDefModelNode.Value = fmt.Sprintf("%s:%s", optClientName, cfgOllamaModels.Content[0].Content[1].Value)
-				verboseInfo("set default model: %s", cfgDefModelName)
-			}
+			verboseInfo("default model setting skip, model not found: %s", optDefModel)
 		}
 	}
 
